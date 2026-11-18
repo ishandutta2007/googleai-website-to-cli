@@ -106,16 +106,32 @@
     inputElement.focus();
     const tag = inputElement.tagName.toLowerCase();
 
+    // Select existing text (if any) so insertText or value setting overwrites cleanly
     if (tag === 'textarea' || tag === 'input') {
-      const proto = tag === 'textarea' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-      const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-      if (nativeSetter) {
-        nativeSetter.call(inputElement, prompt);
-      } else {
-        inputElement.value = prompt;
+      try {
+        inputElement.select();
+      } catch (e) {}
+
+      // Try document.execCommand first because it triggers browser-native input & change events
+      // and updates React/Closure framework state naturally
+      let success = false;
+      try {
+        success = document.execCommand('insertText', false, prompt);
+      } catch (e) {
+        success = false;
       }
-      inputElement.dispatchEvent(new Event('input', { bubbles: true }));
-      inputElement.dispatchEvent(new Event('change', { bubbles: true }));
+
+      if (!success || inputElement.value !== prompt) {
+        const proto = tag === 'textarea' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+        const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (nativeSetter) {
+          nativeSetter.call(inputElement, prompt);
+        } else {
+          inputElement.value = prompt;
+        }
+        inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        inputElement.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      }
     } else if (inputElement.isContentEditable) {
       const selection = window.getSelection();
       const range = document.createRange();
@@ -123,10 +139,12 @@
       selection.removeAllRanges();
       selection.addRange(range);
       document.execCommand('insertText', false, prompt);
+      inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      inputElement.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
     } else {
       inputElement.value = prompt;
-      inputElement.dispatchEvent(new Event('input', { bubbles: true }));
-      inputElement.dispatchEvent(new Event('change', { bubbles: true }));
+      inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      inputElement.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
     }
 
     await sleep(400);
@@ -146,37 +164,70 @@
       }
     }
 
-    // Try clicking any search/send button first if visible
-    const submitBtn = document.querySelector(
-      'button[type="submit"], button.Tg7LZd, button[aria-label*="Search" i], button[aria-label*="Google Search" i], button[aria-label*="Send" i], button[aria-label*="Submit" i], button[jsname="Tg7LZd"]'
-    );
-    if (submitBtn && isVisible(submitBtn)) {
-      submitBtn.click();
-    } else {
-      // Submit by pressing Enter
-      const enterEventInit = {
-        key: 'Enter',
-        code: 'Enter',
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-        cancelable: true,
-      };
-      inputElement.dispatchEvent(new KeyboardEvent('keydown', enterEventInit));
-      inputElement.dispatchEvent(new KeyboardEvent('keypress', enterEventInit));
-      inputElement.dispatchEvent(new KeyboardEvent('keyup', enterEventInit));
+    // Helper: find send / submit button nearby or globally
+    function findSendButton() {
+      // 1. Search inside or near the input container / parent wrappers
+      let container = inputElement;
+      for (let i = 0; i < 6; i++) {
+        container = container.parentElement;
+        if (!container || container === document.body) break;
+        const btn = container.querySelector(
+          'button[aria-label*="Send" i], button[aria-label*="Submit" i], button[jsaction*="submit" i], button[jsaction*="enter" i], button[aria-label*="Search" i], button[type="submit"], div[role="button"][aria-label*="Send" i]'
+        );
+        if (btn && isVisible(btn)) return btn;
+      }
 
-      await sleep(300);
+      // 2. Global search for Send / Submit button
+      const candidateSelectors = [
+        'button[aria-label*="Send" i]',
+        'button[aria-label*="Submit" i]',
+        'button[aria-label="Google Search"]',
+        'button.Tg7LZd',
+        'button[type="submit"]',
+        'div[role="button"][aria-label*="Send" i]',
+      ];
+      for (const sel of candidateSelectors) {
+        const found = Array.from(document.querySelectorAll(sel)).find(isVisible);
+        if (found) return found;
+      }
+      return null;
+    }
 
-      // If form exists and has not navigated, trigger form requestSubmit / submit
-      if (form) {
+    const sendBtn = findSendButton();
+    let clicked = false;
+    if (sendBtn) {
+      try {
+        sendBtn.click();
+        clicked = true;
+      } catch (e) {
+        console.warn('[Google AI CLI Bridge] Click on send button failed:', e);
+      }
+    }
+
+    // Always dispatch Enter key events as well (Google Search & AI Mode listen for Enter keydown)
+    const enterEventInit = {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    };
+    inputElement.dispatchEvent(new KeyboardEvent('keydown', enterEventInit));
+    inputElement.dispatchEvent(new KeyboardEvent('keypress', enterEventInit));
+    inputElement.dispatchEvent(new KeyboardEvent('keyup', enterEventInit));
+
+    await sleep(300);
+
+    // Fallback: If form exists and neither button click nor Enter has submitted, try requestSubmit
+    if (!clicked && form) {
+      try {
+        form.requestSubmit();
+      } catch (e) {
         try {
-          form.requestSubmit();
-        } catch (e) {
-          try {
-            form.submit();
-          } catch (e2) {}
-        }
+          form.submit();
+        } catch (e2) {}
       }
     }
 
