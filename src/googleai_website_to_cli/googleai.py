@@ -35,6 +35,8 @@ class GoogleAIAutomation:
         self.max_wait_seconds = max_wait_seconds
         self.poll_interval = poll_interval
         self._initial_footer_count = 0
+        self._initial_copy_count = 0
+        self._initial_codeblock_count = 0
 
     async def find_or_open_googleai_tab(self) -> int:
         """Find an existing Google AI (udm=50) tab or open a new one.
@@ -80,15 +82,25 @@ class GoogleAIAutomation:
         """
         logger.info("Sending prompt to Google AI (%d chars)...", len(prompt_text))
 
-        # Capture initial footer count before sending
+        # Capture initial counts before sending
         try:
             initial_status = await self.bridge.send_command(
                 "check_response_status", timeout=5
             )
             diag = initial_status.get("diag", {})
             self._initial_footer_count = diag.get("actionFooters", 0)
+            self._initial_copy_count = diag.get("copyButtonsCount", 0)
+            self._initial_codeblock_count = initial_status.get("codeBlockCount", 0)
+            logger.info(
+                "Initial state: footers=%d, copyBtns=%d, codeBlocks=%d",
+                self._initial_footer_count,
+                self._initial_copy_count,
+                self._initial_codeblock_count,
+            )
         except Exception:
             self._initial_footer_count = 0
+            self._initial_copy_count = 0
+            self._initial_codeblock_count = 0
 
         last_exc: Exception | None = None
         for attempt in range(1, max_retries + 1):
@@ -122,9 +134,9 @@ class GoogleAIAutomation:
         """Wait for Google AI to finish generating its response.
 
         Strategy:
-        1. Wait for generation to start (page update / animation).
-        2. Detect footer increase or completion indicator (e.g. action toolbar rendered,
-           loading spinner stopped, content stabilized).
+        Wait until new footers, copy buttons, or new code blocks appear
+        exceeding the pre-prompt count, or the new code block count is positive
+        and generation indicator is absent.
         """
         logger.info(
             "Waiting for Google AI response (up to %ds)...",
@@ -136,6 +148,8 @@ class GoogleAIAutomation:
 
         start_time = asyncio.get_event_loop().time()
         prev_footers = None
+        prev_copy_buttons = None
+        prev_codeblocks = None
         consecutive_stable_polls = 0
         last_content_length = -1
 
@@ -152,55 +166,67 @@ class GoogleAIAutomation:
             diag = status.get("diag", {})
             footer_count = diag.get("actionFooters", 0)
             copy_buttons_count = diag.get("copyButtonsCount", 0)
+            new_copy_buttons_count = diag.get("newCopyButtonsCount", 0)
+            code_block_count = status.get("codeBlockCount", 0)
+            new_code_block_count = status.get("newCodeBlockCount", 0)
             is_generating = diag.get("isGenerating", False)
             content_length = status.get("contentLength", 0)
             elapsed = int(asyncio.get_event_loop().time() - start_time)
 
             logger.info(
-                "Poll: footers=%d copyBtns=%d prev=%s generating=%s len=%d elapsed=%ds",
+                "Poll: footers=%d (prev=%s) copyBtns=%d (prev=%s) codeBlocks=%d (prev=%s) generating=%s elapsed=%ds",
                 footer_count,
-                copy_buttons_count,
                 prev_footers,
+                copy_buttons_count,
+                prev_copy_buttons,
+                code_block_count,
+                prev_codeblocks,
                 is_generating,
-                content_length,
                 elapsed,
             )
 
-            # Signal 1: Detect footer or copy button count INCREASING between polls
-            if prev_footers is not None and (footer_count > prev_footers or (copy_buttons_count > 0 and footer_count >= prev_footers and not is_generating)):
-                # If footers increased, or footers present with copy button and not generating
-                if footer_count > prev_footers or (footer_count > self._initial_footer_count and not is_generating):
-                    logger.info(
-                        "DONE! Response finished (footers=%d, copyBtns=%d). Returning.",
-                        footer_count,
-                        copy_buttons_count,
-                    )
-                    await asyncio.sleep(0.5)
-                    return
-
-            # Signal 2: If copy button is present and not generating and has content
-            if not is_generating and (copy_buttons_count > 0 or footer_count > 0) and content_length > 50:
-                consecutive_stable_polls += 1
-                if consecutive_stable_polls >= 2:
-                    logger.info("DONE! Action footer/copy button active and stable. Returning.")
-                    await asyncio.sleep(0.5)
-                    return
-
-            # Secondary check: If generating is false, content has arrived, and stabilized over consecutive polls
-            if not is_generating and content_length > 100:
-                if content_length == last_content_length:
+            # Condition: detect increment between consecutive polls (last poll values)
+            if not is_generating:
+                if new_code_block_count > 0:
                     consecutive_stable_polls += 1
                     if consecutive_stable_polls >= 2:
-                        logger.info("DONE! Content length stabilized at %d chars.", content_length)
-                        await asyncio.sleep(0.5)
+                        logger.info(
+                            "DONE! New response content detected (newCodeBlocks=%d, newCopyBtns=%d). Returning.",
+                            new_code_block_count,
+                            new_copy_buttons_count,
+                        )
+                        await asyncio.sleep(1.0)
+                        return
+                elif (
+                    prev_footers is not None
+                    and (
+                        footer_count > prev_footers
+                        or (prev_codeblocks is not None and code_block_count > prev_codeblocks)
+                        or (prev_copy_buttons is not None and copy_buttons_count > prev_copy_buttons)
+                    )
+                ):
+                    consecutive_stable_polls += 1
+                    if consecutive_stable_polls >= 2:
+                        logger.info(
+                            "DONE! Increment detected (footers: %s->%d, codeBlocks: %s->%d, copyBtns: %s->%d). Returning.",
+                            prev_footers,
+                            footer_count,
+                            prev_codeblocks,
+                            code_block_count,
+                            prev_copy_buttons,
+                            copy_buttons_count,
+                        )
+                        await asyncio.sleep(1.0)
                         return
                 else:
                     consecutive_stable_polls = 0
             else:
                 consecutive_stable_polls = 0
 
-            last_content_length = content_length
             prev_footers = footer_count
+            prev_copy_buttons = copy_buttons_count
+            prev_codeblocks = code_block_count
+            last_content_length = content_length
             await asyncio.sleep(self.poll_interval)
 
         logger.warning(

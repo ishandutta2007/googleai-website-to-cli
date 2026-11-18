@@ -11,6 +11,11 @@
   }
   window.__googleai_bridge_injected = true;
 
+  // Cached pre-prompt elements to take set difference for newly rendered response items
+  let cachedPrePromptCodeBlocks = new Set();
+  let cachedPrePromptFooters = new Set();
+  let cachedPrePromptCopyBtns = new Set();
+
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const { type } = message;
 
@@ -25,6 +30,7 @@
       extract_last_code_block: () => handleExtractLastCodeBlock(),
       extract_full_response: () => handleExtractFullResponse(),
       diagnose: () => handleDiagnose(),
+      inspect_code_blocks: () => handleInspectCodeBlocks(),
     };
 
     const handler = handlers[type];
@@ -40,6 +46,16 @@
   // ── Prompt Submission ────────────────────────────────────────────────────
 
   async function handleSendPrompt(prompt) {
+    // Cache older code blocks, footers, and copy buttons present before sending prompt
+    const existingCodeBlocks = Array.from(document.querySelectorAll('pre code, pre, code.hljs, div.code-block code')).filter(isVisible);
+    cachedPrePromptCodeBlocks = new Set(existingCodeBlocks);
+
+    const existingFooters = findActionFooters();
+    cachedPrePromptFooters = new Set(existingFooters);
+
+    const existingCopyBtns = Array.from(document.querySelectorAll('button[aria-label*="Copy" i], button.bKxaof, [data-test-id*="copy"]')).filter(isVisible);
+    cachedPrePromptCopyBtns = new Set(existingCopyBtns);
+
     const selectors = [
       'textarea[name="q"]',
       'textarea.gLFyf',
@@ -242,8 +258,10 @@
 
   async function handleCheckResponseStatus() {
     const footers = findActionFooters();
-    const codeBlocks = document.querySelectorAll('pre code, pre, div.code-block code');
-    const visibleCodeBlocks = Array.from(codeBlocks).filter(isVisible);
+    const newFooters = footers.filter(el => !cachedPrePromptFooters.has(el));
+
+    const allCodeBlocks = Array.from(document.querySelectorAll('pre code, pre, div.code-block code')).filter(isVisible);
+    const newCodeBlocks = allCodeBlocks.filter(el => !cachedPrePromptCodeBlocks.has(el));
 
     // Look for active loading spinners or progress bars, excluding copy buttons that have progressbar
     const isGenerating = Array.from(document.querySelectorAll(
@@ -257,6 +275,7 @@
     });
 
     const copyButtons = Array.from(document.querySelectorAll('button[aria-label*="Copy" i], button.bKxaof, [data-test-id*="copy"]')).filter(isVisible);
+    const newCopyButtons = copyButtons.filter(el => !cachedPrePromptCopyBtns.has(el));
 
     const containers = findResponseContainers();
     let contentLength = 0;
@@ -266,7 +285,11 @@
 
     const diag = {
       actionFooters: footers.length,
+      newActionFooters: newFooters.length,
       copyButtonsCount: copyButtons.length,
+      newCopyButtonsCount: newCopyButtons.length,
+      codeBlockCount: allCodeBlocks.length,
+      newCodeBlockCount: newCodeBlocks.length,
       hasCopyBtn: copyButtons.length > 0,
       hasShareBtn: !!document.querySelector('button[aria-label*="Share" i], button[aria-label*="More options" i], [data-test-id*="share"]'),
       isGenerating,
@@ -274,7 +297,8 @@
     };
 
     return {
-      codeBlockCount: visibleCodeBlocks.length,
+      codeBlockCount: allCodeBlocks.length,
+      newCodeBlockCount: newCodeBlocks.length,
       contentLength,
       diag,
     };
@@ -283,15 +307,20 @@
   // ── Code Block Extraction ────────────────────────────────────────────────
 
   async function handleExtractLastCodeBlock() {
-    const codeBlocks = Array.from(
+    const allCodeBlocks = Array.from(
       document.querySelectorAll('pre code, pre, code.hljs, div.code-block code')
     ).filter(isVisible);
 
-    if (codeBlocks.length === 0) {
+    if (allCodeBlocks.length === 0) {
       return { text: null, error: 'No code blocks found' };
     }
 
-    const lastBlock = codeBlocks[codeBlocks.length - 1];
+    // Difference: pick from code blocks not present in cachedPrePromptCodeBlocks
+    const newCodeBlocks = allCodeBlocks.filter(el => !cachedPrePromptCodeBlocks.has(el));
+    const targetBlocks = newCodeBlocks.length > 0 ? newCodeBlocks : allCodeBlocks;
+
+    // Pick the last code block in the target set
+    const lastBlock = targetBlocks[targetBlocks.length - 1];
 
     // Strategy 1: Try to find and click a copy button near the code block
     const copiedText = await tryCopyButton(lastBlock);
@@ -337,19 +366,25 @@
   // ── Full Response Extraction ─────────────────────────────────────────────
 
   function findCopyButtonInFooter() {
-    const copyBtns = Array.from(document.querySelectorAll(
+    const allCopyBtns = Array.from(document.querySelectorAll(
       'button[aria-label*="Copy" i], button.bKxaof, [data-test-id*="copy"], button[title*="Copy" i]'
     )).filter(isVisible);
 
-    if (copyBtns.length > 0) {
-      // Pick the latest copy button on the page (for the latest response)
-      return copyBtns[copyBtns.length - 1];
+    // Difference: pick from copy buttons not present in cachedPrePromptCopyBtns
+    const newCopyBtns = allCopyBtns.filter(el => !cachedPrePromptCopyBtns.has(el));
+    const targetBtns = newCopyBtns.length > 0 ? newCopyBtns : allCopyBtns;
+
+    if (targetBtns.length > 0) {
+      // Pick the latest copy button in the target set (for the latest response)
+      return targetBtns[targetBtns.length - 1];
     }
 
     const footers = findActionFooters();
     if (footers.length === 0) return null;
 
-    const lastFooter = footers[footers.length - 1];
+    const newFooters = footers.filter(el => !cachedPrePromptFooters.has(el));
+    const targetFooters = newFooters.length > 0 ? newFooters : footers;
+    const lastFooter = targetFooters[targetFooters.length - 1];
     return lastFooter.querySelector('button, [role="button"]');
   }
 
@@ -394,6 +429,20 @@
   }
 
   // ── DOM Diagnostics ──────────────────────────────────────────────────────
+
+  async function handleInspectCodeBlocks() {
+    const blocks = Array.from(document.querySelectorAll('pre, pre code, code')).map((el, idx) => ({
+      index: idx,
+      tag: el.tagName,
+      parentTag: el.parentElement?.tagName,
+      parentClass: el.parentElement?.className,
+      className: el.className,
+      isVisible: isVisible(el),
+      textSnippet: (el.innerText || el.textContent || '').trim().slice(0, 80),
+      rect: { top: el.getBoundingClientRect().top, height: el.getBoundingClientRect().height },
+    }));
+    return { blocks };
+  }
 
   async function handleDiagnose() {
     const selectorTests = {
