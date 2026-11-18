@@ -10,8 +10,8 @@
     "alarms"
   ],
   "host_permissions": [
-    "https://www.google.com/*",
-    "https://google.com/*"
+    "https://www.google.com/search/*",
+    "https://google.com/search/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -19,8 +19,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://www.google.com/search*",
-        "https://google.com/search*"
+        "https://www.google.com/search/*",
+        "https://google.com/search/*"
       ],
       "js": ["content.js"]
     }

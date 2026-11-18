@@ -90,6 +90,7 @@ class GoogleAIAutomation:
         except Exception:
             self._initial_footer_count = 0
 
+        last_exc: Exception | None = None
         for attempt in range(1, max_retries + 1):
             try:
                 await self.bridge.send_command(
@@ -104,6 +105,7 @@ class GoogleAIAutomation:
                 )
                 return
             except (ConnectionError, TimeoutError, RuntimeError, OSError) as exc:
+                last_exc = exc
                 logger.warning(
                     "send_prompt failed (attempt %d/%d): %s",
                     attempt,
@@ -114,7 +116,7 @@ class GoogleAIAutomation:
                     logger.info("Retrying send_prompt in %.1fs...", retry_delay)
                     await asyncio.sleep(retry_delay)
 
-        raise RuntimeError(f"Failed to send prompt after {max_retries} attempts.")
+        raise RuntimeError(f"Failed to send prompt after {max_retries} attempts. Last error: {last_exc}")
 
     async def wait_for_response(self) -> None:
         """Wait for Google AI to finish generating its response.
@@ -149,34 +151,40 @@ class GoogleAIAutomation:
 
             diag = status.get("diag", {})
             footer_count = diag.get("actionFooters", 0)
+            copy_buttons_count = diag.get("copyButtonsCount", 0)
             is_generating = diag.get("isGenerating", False)
             content_length = status.get("contentLength", 0)
             elapsed = int(asyncio.get_event_loop().time() - start_time)
 
             logger.info(
-                "Poll: footers=%d prev=%s generating=%s len=%d elapsed=%ds",
+                "Poll: footers=%d copyBtns=%d prev=%s generating=%s len=%d elapsed=%ds",
                 footer_count,
+                copy_buttons_count,
                 prev_footers,
                 is_generating,
                 content_length,
                 elapsed,
             )
 
-            # Detect footer count INCREASING between polls
-            if prev_footers is not None and footer_count > prev_footers:
-                logger.info(
-                    "DONE! Footers increased %d → %d. Returning.",
-                    prev_footers,
-                    footer_count,
-                )
-                await asyncio.sleep(0.5)
-                return
+            # Signal 1: Detect footer or copy button count INCREASING between polls
+            if prev_footers is not None and (footer_count > prev_footers or (copy_buttons_count > 0 and footer_count >= prev_footers and not is_generating)):
+                # If footers increased, or footers present with copy button and not generating
+                if footer_count > prev_footers or (footer_count > self._initial_footer_count and not is_generating):
+                    logger.info(
+                        "DONE! Response finished (footers=%d, copyBtns=%d). Returning.",
+                        footer_count,
+                        copy_buttons_count,
+                    )
+                    await asyncio.sleep(0.5)
+                    return
 
-            # If footer already exists and it's not generating and has content
-            if not is_generating and footer_count > 0 and footer_count > self._initial_footer_count:
-                logger.info("DONE! Action footers present and generation completed.")
-                await asyncio.sleep(0.5)
-                return
+            # Signal 2: If copy button is present and not generating and has content
+            if not is_generating and (copy_buttons_count > 0 or footer_count > 0) and content_length > 50:
+                consecutive_stable_polls += 1
+                if consecutive_stable_polls >= 2:
+                    logger.info("DONE! Action footer/copy button active and stable. Returning.")
+                    await asyncio.sleep(0.5)
+                    return
 
             # Secondary check: If generating is false, content has arrived, and stabilized over consecutive polls
             if not is_generating and content_length > 100:

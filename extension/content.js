@@ -43,25 +43,47 @@
     const selectors = [
       'textarea[name="q"]',
       'textarea.gLFyf',
+      'textarea.ITIRGe',
+      'textarea[aria-label*="Ask" i]',
+      'textarea[placeholder*="Ask" i]',
+      'textarea[aria-label*="follow-up" i]',
+      'textarea[placeholder*="follow-up" i]',
       'textarea',
       'input[name="q"]',
       'input.gLFyf',
+      'input[aria-label*="Ask" i]',
+      'input[aria-label*="Search" i]',
       '[role="combobox"]',
       'div[contenteditable="true"]',
     ];
 
     let inputElement = null;
     for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      if (el && isVisible(el)) {
-        inputElement = el;
-        break;
+      const els = document.querySelectorAll(sel);
+      for (const el of els) {
+        if (el && isVisible(el)) {
+          inputElement = el;
+          break;
+        }
+      }
+      if (inputElement) break;
+    }
+
+    // Fallback: If not visible by offsetParent, check any matched input/textarea in the DOM
+    if (!inputElement) {
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+          inputElement = el;
+          break;
+        }
       }
     }
 
     if (!inputElement) {
       throw new Error(
-        'Could not find the Google search/prompt input element. Make sure the page is fully loaded.'
+        `Could not find Google search/prompt input element on ${window.location.href}. ` +
+        `Available tags: textarea=${document.querySelectorAll('textarea').length}, input=${document.querySelectorAll('input').length}`
       );
     }
 
@@ -108,31 +130,37 @@
       }
     }
 
-    // Submit by pressing Enter
-    const enterEventInit = {
-      key: 'Enter',
-      code: 'Enter',
-      keyCode: 13,
-      which: 13,
-      bubbles: true,
-      cancelable: true,
-    };
-    inputElement.dispatchEvent(new KeyboardEvent('keydown', enterEventInit));
-    inputElement.dispatchEvent(new KeyboardEvent('keypress', enterEventInit));
-    inputElement.dispatchEvent(new KeyboardEvent('keyup', enterEventInit));
-
-    // Also click search submit button if Enter alone did not trigger submission
-    await sleep(300);
+    // Try clicking any search/send button first if visible
     const submitBtn = document.querySelector(
-      'button[type="submit"], button.Tg7LZd, button[aria-label*="Search" i], button[aria-label*="Google Search" i], button[jsname="Tg7LZd"]'
+      'button[type="submit"], button.Tg7LZd, button[aria-label*="Search" i], button[aria-label*="Google Search" i], button[aria-label*="Send" i], button[aria-label*="Submit" i], button[jsname="Tg7LZd"]'
     );
     if (submitBtn && isVisible(submitBtn)) {
       submitBtn.click();
-    } else if (form) {
-      try {
-        form.requestSubmit();
-      } catch (e) {
-        form.submit();
+    } else {
+      // Submit by pressing Enter
+      const enterEventInit = {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true,
+      };
+      inputElement.dispatchEvent(new KeyboardEvent('keydown', enterEventInit));
+      inputElement.dispatchEvent(new KeyboardEvent('keypress', enterEventInit));
+      inputElement.dispatchEvent(new KeyboardEvent('keyup', enterEventInit));
+
+      await sleep(300);
+
+      // If form exists and has not navigated, trigger form requestSubmit / submit
+      if (form) {
+        try {
+          form.requestSubmit();
+        } catch (e) {
+          try {
+            form.submit();
+          } catch (e2) {}
+        }
       }
     }
 
@@ -142,18 +170,24 @@
   // ── Action Footer Detection ──────────────────────────────────────────────
 
   /**
-   * Find action footers or response toolbars (Copy, Share, Like/Dislike, etc.).
+   * Find action footers or response toolbars (Copy, Share, More options, etc.).
    */
   function findActionFooters() {
     const footers = [];
     const seen = new Set();
 
-    // Selectors for Google AI / AI Overview action toolbars or copy buttons
+    // Selectors for Google AI response actions/toolbars
     const selectors = [
-      '[role="toolbar"][aria-label*="actions" i]',
-      '[role="toolbar"][aria-label*="result" i]',
       'button[aria-label*="Copy" i]',
       'button[aria-label*="Share" i]',
+      '[aria-label*="More options" i]',
+      '[role="button"][aria-label*="More options" i]',
+      'div.RkJvxe',
+      'div.zkL70c',
+      'div.YHsVn',
+      'button.bKxaof',
+      '[role="toolbar"][aria-label*="actions" i]',
+      '[role="toolbar"][aria-label*="result" i]',
       '[data-test-id*="copy"]',
       '[data-test-id*="share"]',
     ];
@@ -163,6 +197,9 @@
       for (const el of matches) {
         if (!isVisible(el)) continue;
         const container =
+          el.closest('.zkL70c') ||
+          el.closest('.RkJvxe') ||
+          el.closest('.YHsVn') ||
           el.closest('[role="toolbar"]') ||
           el.closest('[data-attrid]') ||
           el.closest('div') ||
@@ -179,6 +216,8 @@
 
   function findResponseContainers() {
     const selectors = [
+      'div.zkL70c',
+      'div.RkJvxe',
       'div[data-sge-ci]',
       'div[data-attrid="wa:/description"]',
       'div.gizJZe',
@@ -186,6 +225,7 @@
       'div[data-ved] div[data-attrid]',
       'div#rso',
       'div#main',
+      'div[role="main"]',
     ];
 
     const results = [];
@@ -205,10 +245,18 @@
     const codeBlocks = document.querySelectorAll('pre code, pre, div.code-block code');
     const visibleCodeBlocks = Array.from(codeBlocks).filter(isVisible);
 
-    // Look for loading spinners or progress bars
-    const isGenerating = !!document.querySelector(
+    // Look for active loading spinners or progress bars, excluding copy buttons that have progressbar
+    const isGenerating = Array.from(document.querySelectorAll(
       '.animate-spin, [role="progressbar"], [aria-label*="Loading" i], [aria-label*="Generating" i], div[jsname*="progress"]'
-    );
+    )).some(el => {
+      // Ignore copy progressbar inside button
+      if (el.getAttribute('aria-label') === 'Copy in progress' || el.closest('button')) {
+        return false;
+      }
+      return isVisible(el);
+    });
+
+    const copyButtons = Array.from(document.querySelectorAll('button[aria-label*="Copy" i], button.bKxaof, [data-test-id*="copy"]')).filter(isVisible);
 
     const containers = findResponseContainers();
     let contentLength = 0;
@@ -218,8 +266,9 @@
 
     const diag = {
       actionFooters: footers.length,
-      hasCopyBtn: !!document.querySelector('button[aria-label*="Copy" i], [data-test-id*="copy"]'),
-      hasShareBtn: !!document.querySelector('button[aria-label*="Share" i], [data-test-id*="share"]'),
+      copyButtonsCount: copyButtons.length,
+      hasCopyBtn: copyButtons.length > 0,
+      hasShareBtn: !!document.querySelector('button[aria-label*="Share" i], button[aria-label*="More options" i], [data-test-id*="share"]'),
       isGenerating,
       textareaFound: !!document.querySelector('textarea, input[name="q"]'),
     };
@@ -288,10 +337,14 @@
   // ── Full Response Extraction ─────────────────────────────────────────────
 
   function findCopyButtonInFooter() {
-    const copyBtn = document.querySelector(
-      'button[aria-label*="Copy" i], [data-test-id*="copy"], button[title*="Copy" i]'
-    );
-    if (copyBtn && isVisible(copyBtn)) return copyBtn;
+    const copyBtns = Array.from(document.querySelectorAll(
+      'button[aria-label*="Copy" i], button.bKxaof, [data-test-id*="copy"], button[title*="Copy" i]'
+    )).filter(isVisible);
+
+    if (copyBtns.length > 0) {
+      // Pick the latest copy button on the page (for the latest response)
+      return copyBtns[copyBtns.length - 1];
+    }
 
     const footers = findActionFooters();
     if (footers.length === 0) return null;
@@ -357,6 +410,17 @@
       url: window.location.href,
       actionFooterCount: findActionFooters().length,
       selectorTests,
+      textareas: Array.from(document.querySelectorAll('textarea, input[name="q"], [role="combobox"]')).map(el => ({
+        tag: el.tagName,
+        name: el.getAttribute('name'),
+        id: el.id,
+        className: el.className,
+        ariaLabel: el.getAttribute('aria-label'),
+        placeholder: el.getAttribute('placeholder'),
+        isVisible: isVisible(el),
+        offsetParent: !!el.offsetParent,
+        rect: { width: el.getBoundingClientRect().width, height: el.getBoundingClientRect().height },
+      })),
     };
   }
 

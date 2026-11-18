@@ -180,17 +180,32 @@ async function handleCommand(msg) {
 
 async function queryGoogleAITabs(filter = {}) {
   const tabs = await chrome.tabs.query(filter);
-  return tabs.filter((t) => t.url && (t.url.includes('google.com/search') && t.url.includes('udm=50')));
+  // Match any tab on google.com containing udm=50 or google.com search/home
+  return tabs.filter((t) => {
+    if (!t.url) return false;
+    const url = t.url.toLowerCase();
+    return url.includes('google.com') && (url.includes('udm=50') || url.includes('/search') || url.includes('google.com'));
+  });
 }
 
 async function findGoogleAITab() {
-  // Prefer active tab in current window
-  let activeTabs = await queryGoogleAITabs({ active: true, currentWindow: true });
-  if (activeTabs.length > 0) return activeTabs[0];
+  // 1. Prefer active tab that explicitly has udm=50 in the current window
+  let activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  let udmTab = activeTabs.find((t) => t.url && t.url.includes('udm=50'));
+  if (udmTab) return udmTab;
 
-  // Fall back to any Google AI tab
-  let allTabs = await queryGoogleAITabs();
-  return allTabs.length > 0 ? allTabs[0] : null;
+  // 2. Any active Google tab in current window
+  let googleActive = activeTabs.find((t) => t.url && t.url.includes('google.com'));
+  if (googleActive) return googleActive;
+
+  // 3. Any tab anywhere with udm=50
+  let allTabs = await chrome.tabs.query({});
+  let anyUdm = allTabs.find((t) => t.url && t.url.includes('udm=50'));
+  if (anyUdm) return anyUdm;
+
+  // 4. Any Google tab
+  let anyGoogle = allTabs.find((t) => t.url && t.url.includes('google.com'));
+  return anyGoogle || null;
 }
 
 async function ensureContentScript(tabId) {
