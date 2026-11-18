@@ -172,8 +172,11 @@
         container = container.parentElement;
         if (!container || container === document.body) break;
         const btn = container.querySelector(
-          'button[aria-label*="Send" i], button[aria-label*="Submit" i], button[jsaction*="submit" i], button[jsaction*="enter" i], button[aria-label*="Search" i], button[type="submit"], div[role="button"][aria-label*="Send" i]'
+          'button[aria-label*="Send" i], button[aria-label*="Submit" i], button[aria-label*="Search" i]'
+          //, button[jsaction*="submit" i], button[jsaction*="enter" i], button[type="submit"], div[role="button"][aria-label*="Send" i]'
         );
+        console.log("btn:");
+        console.log(btn);        
         if (btn && isVisible(btn)) return btn;
       }
 
@@ -188,12 +191,16 @@
       ];
       for (const sel of candidateSelectors) {
         const found = Array.from(document.querySelectorAll(sel)).find(isVisible);
+        console.log("found:");
+        console.log(found);
         if (found) return found;
       }
       return null;
     }
 
     const sendBtn = findSendButton();
+    console.log("sendBtn:");
+    console.log(sendBtn);
     let clicked = false;
     if (sendBtn) {
       try {
