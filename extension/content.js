@@ -377,17 +377,26 @@
     const newCodeBlocks = allCodeBlocks.filter(el => !cachedPrePromptCodeBlocks.has(el));
     const targetBlocks = newCodeBlocks.length > 0 ? newCodeBlocks : allCodeBlocks;
 
-    // Pick the last code block in the target set
-    const lastBlock = targetBlocks[targetBlocks.length - 1];
+    // Pick the largest code block by content length among candidate blocks
+    let chosenBlock = targetBlocks[0];
+    let maxLength = -1;
+
+    for (const block of targetBlocks) {
+      const len = (block.innerText || block.textContent || '').trim().length;
+      if (len >= maxLength) {
+        maxLength = len;
+        chosenBlock = block;
+      }
+    }
 
     // Strategy 1: Try to find and click a copy button near the code block
-    const copiedText = await tryCopyButton(lastBlock);
+    const copiedText = await tryCopyButton(chosenBlock);
     if (copiedText) {
       return { text: copiedText, method: 'copy_button' };
     }
 
     // Strategy 2: Read text content directly
-    const text = lastBlock.innerText || lastBlock.textContent;
+    const text = chosenBlock.innerText || chosenBlock.textContent;
     if (text && text.trim()) {
       return { text: text.trim(), method: 'innerText' };
     }
